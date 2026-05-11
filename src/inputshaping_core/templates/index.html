@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Inputshaping bench</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Inputshaping bench</h1>
+  <div id="conn-state" class="badge">disconnected</div>
+</header>
+
+<main class="grid">
+
+  <section class="card" id="status-card">
+    <h2>Status</h2>
+    <dl>
+      <dt>Experiment</dt><dd id="exp-state">idle</dd>
+      <dt>Profile</dt><dd id="exp-label">&mdash;</dd>
+      <dt>Progress</dt>
+      <dd>
+        <div class="progress"><div id="exp-progress" class="bar"></div></div>
+        <span id="exp-elapsed">0.0 s / 0.0 s</span>
+      </dd>
+      <dt>Last v<sub>cmd</sub></dt><dd id="exp-lastv">0.000 m/s</dd>
+
+      <dt>Shaper</dt><dd id="shaper-active">disabled</dd>
+      <dt>Shaper delay</dt><dd id="shaper-delay">0 ms</dd>
+
+      <dt>IMU rate</dt><dd id="imu-rate">no data</dd>
+      <dt>IMU dropped</dt><dd id="imu-dropped">0</dd>
+    </dl>
+  </section>
+
+  <section class="card" id="shaper-card">
+    <h2>Shaper</h2>
+    <div class="field">
+      <label>Type
+        <select id="shaper-name">
+          <option value="">(none / bypass)</option>
+          <option value="ZV">ZV</option>
+          <option value="ZVD">ZVD</option>
+          <option value="MZV" selected>MZV</option>
+          <option value="EI">EI</option>
+          <option value="2HUMP_EI">2HUMP_EI</option>
+        </select>
+      </label>
+    </div>
+    <div class="field">
+      <label>Frequency, Hz
+        <input id="shaper-freq" type="number" step="0.1" min="1" max="60" value="8.0">
+      </label>
+    </div>
+    <div class="field">
+      <label>Damping ratio
+        <input id="shaper-damp" type="number" step="0.005" min="0.001" max="0.4" value="0.05">
+      </label>
+    </div>
+    <div class="field">
+      <label><input id="shaper-enabled" type="checkbox"> Enable shaping</label>
+    </div>
+    <button id="shaper-apply">Apply shaper</button>
+  </section>
+
+  <section class="card" id="motion-card">
+    <h2>Drive</h2>
+    <div class="field">
+      <label>Distance, m
+        <input id="motion-dist" type="number" step="0.05" min="0.05" max="3.0" value="1.0">
+      </label>
+    </div>
+    <div class="field">
+      <label>v_max, m/s
+        <input id="motion-vmax" type="number" step="0.05" min="0.05" max="0.5" value="0.25">
+      </label>
+    </div>
+    <div class="field">
+      <label>a_max, m/s<sup>2</sup>
+        <input id="motion-amax" type="number" step="0.05" min="0.05" max="1.0" value="0.5">
+      </label>
+    </div>
+    <div class="button-row">
+      <button id="motion-fwd" class="primary">Forward</button>
+      <button id="motion-bwd" class="primary">Backward</button>
+      <button id="motion-cancel" class="danger">STOP</button>
+    </div>
+    <p class="hint">
+      Shaper is applied if &laquo;Enable&raquo; above is checked.
+      Either way the chassis topic is <code>/cmd_vel_shaped</code>.
+    </p>
+  </section>
+
+  <section class="card" id="psd-card">
+    <h2>Collect PSD</h2>
+    <div class="field">
+      <label>Method
+        <select id="psd-method">
+          <option value="moving_chirp" selected>Moving chirp (recommended)</option>
+          <option value="moving_impulse">Moving impulse</option>
+          <option value="moving_step">Moving step</option>
+        </select>
+      </label>
+    </div>
+    <div class="field">
+      <label>Cruise v<sub>0</sub>, m/s
+        <input id="psd-vcruise" type="number" step="0.01" min="0.05" max="0.4" value="0.15">
+      </label>
+    </div>
+
+    <fieldset class="psd-only psd-moving_chirp">
+      <legend>Bounded chirp parameters</legend>
+      <label>Max distance, m <input id="psd-distance" type="number" step="0.1" min="0.2" max="5" value="1.0"></label>
+      <label>Number of passes <input id="psd-passes" type="number" step="1" min="1" max="8" value="2"></label>
+      <label>f_start, Hz <input id="psd-fstart" type="number" step="0.5" min="0.5" max="20" value="1.0"></label>
+      <label>f_end, Hz <input id="psd-fend" type="number" step="0.5" min="2" max="60" value="25"></label>
+      <label>Peak a, m/s<sup>2</sup> <input id="psd-apeak" type="number" step="0.05" min="0.05" max="1.5" value="0.6"></label>
+      <p class="hint" id="psd-chirp-hint">Robot sweeps within &plusmn; max_distance of its start point; each pass cruises one-way with the chirp on top.</p>
+    </fieldset>
+    <fieldset class="psd-only psd-moving_impulse" hidden>
+      <legend>Impulse parameters</legend>
+      <label>Pulse width, s <input id="psd-pulse-w" type="number" step="0.005" min="0.01" max="0.3" value="0.05"></label>
+      <label>Pulse &Delta;v, m/s <input id="psd-pulse-dv" type="number" step="0.005" min="0.01" max="0.2" value="0.05"></label>
+    </fieldset>
+    <fieldset class="psd-only psd-moving_step" hidden>
+      <legend>Step parameters</legend>
+      <label>Step &Delta;v, m/s <input id="psd-step-dv" type="number" step="0.01" min="0.02" max="0.3" value="0.1"></label>
+    </fieldset>
+
+    <div class="field">
+      <label>Direction
+        <select id="psd-dir">
+          <option value="1">Forward</option>
+          <option value="-1">Backward</option>
+        </select>
+      </label>
+    </div>
+    <button id="psd-go" class="primary">Collect PSD</button>
+    <p class="hint">
+      Saved as <code>data/calibration_data_x_*.csv</code> + matching
+      resonance plots, just like Klipper.
+    </p>
+  </section>
+
+  <section class="card wide" id="imu-card">
+    <h2>Accelerometer (live)</h2>
+    <canvas id="imu-canvas" width="1200" height="260"></canvas>
+    <div class="imu-readout">
+      <span class="legend ax"><span class="dot"></span>a<sub>x</sub>=<b id="imu-ax-val">—</b> m/s<sup>2</sup></span>
+      <span class="legend ay"><span class="dot"></span>a<sub>y</sub>=<b id="imu-ay-val">—</b> m/s<sup>2</sup></span>
+      <span class="legend az"><span class="dot"></span>a<sub>z</sub>=<b id="imu-az-val">—</b> m/s<sup>2</sup></span>
+      <span class="muted" id="imu-window-info">window: 2 s</span>
+      <span class="muted" style="margin-left:auto">
+        <label>window, s
+          <input id="imu-window" type="number" step="0.5" min="0.5" max="10" value="2.0" style="width:60px">
+        </label>
+      </span>
+    </div>
+  </section>
+
+  <section class="card wide" id="results-card">
+    <h2>Recent results</h2>
+    <ul id="results-list"><li class="muted">No runs yet.</li></ul>
+  </section>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

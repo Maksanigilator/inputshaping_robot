@@ -1,0 +1,51 @@
+services:
+  # All-in-one node: shaper, IMU bridge, experiment runner, and Flask GUI.
+  # Single process keeps state coherent (one source of truth for shaper params
+  # and ongoing experiment) and avoids ROS service plumbing for the GUI.
+  inputshaping:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    image: inputshaping_robot:humble
+    container_name: inputshaping
+    # host networking so DDS sees the robot on ROS_DOMAIN_ID without bridges.
+    network_mode: host
+    # /dev needed for /dev/ttyACM* (the Pico CDC).
+    # privileged is the simplest way to also see udev hotplug; if you prefer
+    # least-privilege, drop privileged and use `devices: [/dev/ttyACM0:/dev/ttyACM0]`.
+    privileged: true
+    volumes:
+      # Source: bind-mount so edits on the host are live in the container.
+      - ./src:/workspace/src
+      # Generated outputs: visible on the host so the user can open
+      # CSVs/PNGs without exec'ing into the container.
+      - ./data:/workspace/data
+      # Build artefacts: named volumes (not bind-mounts) so root-owned files
+      # written inside the container don't bite the host user with
+      # "Permission denied" on `rm -rf build install log`. Wipe with
+      # `docker compose down -v`.
+      - inputshaping_build:/workspace/build
+      - inputshaping_install:/workspace/install
+      - inputshaping_log:/workspace/log
+      # USB CDC for the Pico W.
+      - /dev:/dev
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      - PYTHONUNBUFFERED=1
+      # Pico CDC; override at runtime if you have multiple ACM devices.
+      - INPUTSHAPING_SERIAL_PORT=${INPUTSHAPING_SERIAL_PORT:-/dev/ttyACM0}
+      - INPUTSHAPING_GUI_PORT=${INPUTSHAPING_GUI_PORT:-8080}
+    command:
+      - ros2
+      - launch
+      - inputshaping_core
+      - bringup.launch.py
+    # During development we want failures to be visible, not hidden behind a
+    # restart loop. Flip back to ``unless-stopped`` once it boots cleanly.
+    restart: "no"
+
+volumes:
+  inputshaping_build:
+  inputshaping_install:
+  inputshaping_log:

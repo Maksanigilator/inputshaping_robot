@@ -1,0 +1,13 @@
+build/
+install/
+log/
+data/*.csv
+data/*.png
+
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+.vscode/
+.idea/

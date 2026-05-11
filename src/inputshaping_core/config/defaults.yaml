@@ -1,0 +1,19 @@
+inputshaping_experiment_node:
+  ros__parameters:
+    cmd_vel_raw_topic: "/cmd_vel_raw"
+    cmd_vel_shaped_topic: "/cmd_vel_shaped"
+    imu_topic: "/imu/data_raw"
+    data_dir: "/workspace/data"
+    gui_host: "0.0.0.0"
+    gui_port: 8080
+    v_max_default: 0.25
+    a_max_default: 0.5
+    v_max_limit: 0.5
+    a_max_limit: 1.0
+
+mpu_serial_node:
+  ros__parameters:
+    port: "/dev/ttyACM0"
+    topic: "/imu/data_raw"
+    frame_id: "imu_link"
+    reconnect_period_sec: 1.0
