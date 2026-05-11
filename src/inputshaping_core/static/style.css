@@ -138,6 +138,24 @@ code {
   font-size: 12px;
 }
 
+.motion-info {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: #1a1d22;
+  border: 1px solid #2a2d33;
+  border-radius: 4px;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.motion-info.warn {
+  border-color: #b07a2a;
+  background: #261f12;
+}
+.motion-info .warn-text {
+  color: #f0a040;
+  margin-top: 4px;
+}
+
 #imu-canvas {
   display: block;
   width: 100%;

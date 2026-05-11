@@ -59,7 +59,10 @@ class ExperimentNode(Node):
         self.declare_parameter('data_dir', data_default)
         self.declare_parameter('v_max_default', 0.25)
         self.declare_parameter('a_max_default', 0.5)
-        self.declare_parameter('v_max_limit', 0.5)
+        # Physical ceiling of the aida_bot platform: wheel_radius=0.095 m,
+        # odroid_driver max_speed=100 rpm  ->  v_max ~= 0.99 m/s. We cap at
+        # 0.9 to leave a small margin, and at 1.0 m/s^2 for accel.
+        self.declare_parameter('v_max_limit', 0.9)
         self.declare_parameter('a_max_limit', 1.0)
 
         raw_topic = self.get_parameter('cmd_vel_raw_topic').value
@@ -245,8 +248,25 @@ class ExperimentNode(Node):
 
     def start_motion(self, distance: float, v_max: float,
                      a_max: float) -> dict:
-        v_max = float(np.clip(v_max, 0.02, self._v_max_limit))
-        a_max = float(np.clip(a_max, 0.02, self._a_max_limit))
+        # Remember what the caller asked for so we can flag silent clamping
+        # in the response -- otherwise a "v_max = 50 m/s" typo just gets
+        # quietly chopped to v_max_limit and the user wonders why the robot
+        # didn't fly.
+        v_req, a_req = float(v_max), float(a_max)
+        v_max = float(np.clip(v_req, 0.02, self._v_max_limit))
+        a_max = float(np.clip(a_req, 0.02, self._a_max_limit))
+        warnings: list[str] = []
+        if abs(v_max - v_req) > 1e-6:
+            warnings.append(
+                f'v_max clamped {v_req:.3f} -> {v_max:.3f} m/s '
+                f'(limit {self._v_max_limit:.2f}).')
+        if abs(a_max - a_req) > 1e-6:
+            warnings.append(
+                f'a_max clamped {a_req:.3f} -> {a_max:.3f} m/s^2 '
+                f'(limit {self._a_max_limit:.2f}).')
+        if warnings:
+            for w in warnings:
+                self.get_logger().warn(w)
         profile = _motion.trapezoid_distance(distance=distance,
                                              v_max=v_max, a_max=a_max,
                                              dt=PUBLISH_PERIOD_S)
@@ -255,6 +275,11 @@ class ExperimentNode(Node):
             'label': profile.label,
             'duration': profile.duration,
             'metadata': profile.metadata,
+            'requested': {'v_max': v_req, 'a_max': a_req},
+            'applied': {'v_max': v_max, 'a_max': a_max},
+            'limits': {'v_max': self._v_max_limit,
+                       'a_max': self._a_max_limit},
+            'warnings': warnings,
         }
 
     def start_psd(self, method: str, params: dict) -> dict:

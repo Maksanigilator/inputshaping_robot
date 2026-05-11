@@ -86,7 +86,15 @@ compose-down)
 exec)
     [ -n "${1:-}" ] || { echo "usage: robot.sh exec <container> <cmd...>"; exit 2; }
     ctr="$1"; shift
-    ssh_to "docker exec -it $ctr ${*:-bash}"
+    if [ $# -eq 0 ]; then
+        # Interactive shell -- request a TTY both at ssh and at docker exec.
+        ssh -t "${ROBOT_USER}@${ROBOT_HOST}" "docker exec -it $ctr bash"
+    else
+        # One-shot command: pipe argv as stdin so we don't need a TTY and
+        # don't have to wrestle with quoting across three shells.
+        printf '%s\n' "$*" | ssh "${ROBOT_USER}@${ROBOT_HOST}" \
+            "docker exec -i $ctr bash -l"
+    fi
     ;;
 ssh)
     ssh "${ROBOT_USER}@${ROBOT_HOST}"

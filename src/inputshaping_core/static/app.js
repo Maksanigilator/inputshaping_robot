@@ -82,6 +82,28 @@ function showPsdFields(method) {
   qa('.psd-only').forEach(el => { el.hidden = !el.classList.contains(`psd-${method}`); });
 }
 
+// Surface the server's clamp decision and the actual trapezoid the runner
+// is about to publish, so users notice when their input was silently capped
+// (e.g. a v_max=50 typo getting chopped to the 0.9 m/s hardware ceiling).
+function showMotionInfo(exp) {
+  const el = q('#motion-info');
+  if (!el || !exp) return;
+  const req = exp.requested || {};
+  const app = exp.applied || {};
+  const warn = (exp.warnings || []).join(' ');
+  const dur = Number.isFinite(exp.duration) ? exp.duration.toFixed(2) : '—';
+  el.classList.toggle('warn', !!warn);
+  el.hidden = false;
+  el.innerHTML = `
+    <div><b>${exp.label || 'motion'}</b> &mdash; duration ${dur} s</div>
+    <div class="muted">
+      v_max: ${fmt(req.v_max)} &rarr; <b>${fmt(app.v_max)}</b> m/s,
+      a_max: ${fmt(req.a_max)} &rarr; <b>${fmt(app.a_max)}</b> m/s<sup>2</sup>
+    </div>
+    ${warn ? `<div class="warn-text">⚠ ${warn}</div>` : ''}
+  `;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   q('#shaper-apply').onclick = async () => {
     await postJSON('/api/shaper', {
@@ -93,11 +115,15 @@ document.addEventListener('DOMContentLoaded', () => {
     refresh();
   };
 
-  const startMotion = (sign) => postJSON('/api/motion', {
-    distance: sign * parseFloat(q('#motion-dist').value),
-    v_max: parseFloat(q('#motion-vmax').value),
-    a_max: parseFloat(q('#motion-amax').value),
-  });
+  const startMotion = async (sign) => {
+    const resp = await postJSON('/api/motion', {
+      distance: sign * parseFloat(q('#motion-dist').value),
+      v_max: parseFloat(q('#motion-vmax').value),
+      a_max: parseFloat(q('#motion-amax').value),
+    });
+    showMotionInfo(resp && resp.experiment);
+    return resp;
+  };
   q('#motion-fwd').onclick = () => startMotion(+1).then(refresh);
   q('#motion-bwd').onclick = () => startMotion(-1).then(refresh);
   q('#motion-cancel').onclick = () => postJSON('/api/cancel').then(refresh);

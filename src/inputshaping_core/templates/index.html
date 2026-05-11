@@ -72,7 +72,7 @@
     </div>
     <div class="field">
       <label>v_max, m/s
-        <input id="motion-vmax" type="number" step="0.05" min="0.05" max="0.5" value="0.25">
+        <input id="motion-vmax" type="number" step="0.05" min="0.05" max="0.9" value="0.3">
       </label>
     </div>
     <div class="field">
@@ -85,9 +85,13 @@
       <button id="motion-bwd" class="primary">Backward</button>
       <button id="motion-cancel" class="danger">STOP</button>
     </div>
+    <div id="motion-info" class="motion-info" hidden></div>
     <p class="hint">
-      Shaper is applied if &laquo;Enable&raquo; above is checked.
-      Either way the chassis topic is <code>/cmd_vel_shaped</code>.
+      Physical ceiling for this robot is ~0.9 m/s, 1.0 m/s<sup>2</sup>
+      (wheel r=0.095 m, driver max 100 rpm). Values above are silently
+      clamped server-side &mdash; the banner above will warn you.
+      Chassis topic is <code>/cmd_vel_shaped</code>; the shaper is applied
+      only if &laquo;Enable&raquo; is checked above.
     </p>
   </section>
 
