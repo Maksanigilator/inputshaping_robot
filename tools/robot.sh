@@ -99,6 +99,21 @@ exec)
 ssh)
     ssh "${ROBOT_USER}@${ROBOT_HOST}"
     ;;
+probe-drive)
+    # Stream the cmd_vel-vs-wheel_odometry trace from inside the ROS
+    # container on the robot. We feed the script through stdin so we
+    # don't have to copy any files to the robot first.
+    duration="${1:-0}"
+    script="$(dirname "$0")/probe_drive.py"
+    [ -f "$script" ] || { echo "missing $script"; exit 2; }
+    {
+        echo "set -e"
+        echo "python3 - --duration ${duration} <<'__PY_EOF__'"
+        cat "$script"
+        echo "__PY_EOF__"
+    } | ssh "${ROBOT_USER}@${ROBOT_HOST}" \
+        "docker exec -i ${ROS_CTR} bash -lc 'source /opt/ros/humble/setup.bash && bash -s'"
+    ;;
 *)
     sed -n '1,40p' "$0"
     exit 2
