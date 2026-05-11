@@ -91,8 +91,13 @@ exec)
         ssh -t "${ROBOT_USER}@${ROBOT_HOST}" "docker exec -it $ctr bash"
     else
         # One-shot command: pipe argv as stdin so we don't need a TTY and
-        # don't have to wrestle with quoting across three shells.
-        printf '%s\n' "$*" | ssh "${ROBOT_USER}@${ROBOT_HOST}" \
+        # don't have to wrestle with quoting across three shells. We
+        # auto-source the ROS overlay first so callers can just say
+        # "ros2 topic list" without prefixing it themselves.
+        {
+            echo 'source /opt/ros/humble/setup.bash 2>/dev/null'
+            printf '%s\n' "$*"
+        } | ssh "${ROBOT_USER}@${ROBOT_HOST}" \
             "docker exec -i $ctr bash -l"
     fi
     ;;
