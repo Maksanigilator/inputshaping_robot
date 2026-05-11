@@ -321,6 +321,165 @@ def plot_shaper_candidates(psd: PsdResult, report: ShaperReport,
     return path
 
 
+# ---------------------------------------------------------------------------
+# Klipper-style plots
+# ---------------------------------------------------------------------------
+#
+# Reproductions of the two plots that ``klipper/scripts/calibrate_shaper.py``
+# produces, kept side-by-side with our own plots so the user can compare.
+# Conventions copied verbatim from upstream Klipper:
+#
+#   * linear (not log) PSD axis
+#   * X = red, Y = green, Z = blue, X+Y+Z = purple
+#   * shaper residual curves on a twin axis on the right ("ratio")
+#   * dash-dot line + cyan "after shaper" curve for the recommended shaper
+#
+# Reference: https://github.com/Klipper3d/klipper/blob/master/scripts/
+#            calibrate_shaper.py
+
+
+_KLIPPER_AXIS_COLORS = {
+    'total': 'purple',
+    'x':     'red',
+    'y':     'green',
+    'z':     'blue',
+}
+
+
+def plot_psd_klipper(psd: PsdResult, out_dir: Path, axis: str = 'x',
+                     timestamp: str | None = None,
+                     peak: tuple[float, float] | None = None,
+                     title_suffix: str = '') -> Path:
+    """Klipper ``calibrate_shaper.py`` style PSD plot.
+
+    A single linear-scale figure with one curve per axis plus the X+Y+Z
+    total. Frequency band is the same as ``compute_psd``.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = timestamp or _ts()
+    path = out_dir / f'resonances_klipper_{axis}_{ts}.png'
+
+    fig, ax_ = plt.subplots(figsize=(10, 5))
+    ax_.set_xlabel('Frequency, Hz')
+    ax_.set_xlim(psd.freqs[0], psd.freqs[-1])
+    ax_.set_ylabel('Power spectral density')
+
+    ax_.plot(psd.freqs, psd.psd_total, label='X+Y+Z',
+             color=_KLIPPER_AXIS_COLORS['total'], linewidth=1.2)
+    ax_.plot(psd.freqs, psd.psd_x, label='X',
+             color=_KLIPPER_AXIS_COLORS['x'], alpha=0.85)
+    ax_.plot(psd.freqs, psd.psd_y, label='Y',
+             color=_KLIPPER_AXIS_COLORS['y'], alpha=0.85)
+    ax_.plot(psd.freqs, psd.psd_z, label='Z',
+             color=_KLIPPER_AXIS_COLORS['z'], alpha=0.85)
+
+    if peak is not None:
+        pf, pv = peak
+        ax_.axvline(pf, color='gray', linestyle='--', alpha=0.7)
+        ax_.annotate(f'peak {pf:.1f} Hz', xy=(pf, pv), xytext=(pf + 1.0, pv),
+                     color='gray', fontsize=9)
+
+    ax_.grid(which='major', color='grey', alpha=0.35)
+    ax_.grid(which='minor', color='lightgrey', alpha=0.25)
+    ax_.minorticks_on()
+    ax_.legend(loc='upper right', fontsize=9)
+
+    title = f'Frequency response (axis {axis.upper()}, fs={psd.sample_rate:.0f} Hz)'
+    if title_suffix:
+        title += f'  --  {title_suffix}'
+    ax_.set_title(title)
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+    return path
+
+
+def plot_shaper_klipper(psd: PsdResult, report: ShaperReport,
+                        out_dir: Path, axis: str = 'x',
+                        timestamp: str | None = None,
+                        damping_ratio: float = _shapers.DEFAULT_DAMPING_RATIO
+                        ) -> Path:
+    """Klipper ``calibrate_shaper.py`` style combined shaper plot.
+
+    Left Y: linear PSD with per-axis curves and a cyan "after-shaper" curve
+    for the recommended shaper. Right Y: each shaper's residual-vibration
+    curve as a function of frequency.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = timestamp or _ts()
+    path = out_dir / f'shaper_calibrate_klipper_{axis}_{ts}.png'
+
+    f_series = {
+        'x': psd.psd_x, 'y': psd.psd_y, 'z': psd.psd_z,
+        'total': psd.psd_total,
+    }[axis]
+
+    fig, ax_psd = plt.subplots(figsize=(12, 6.5))
+    ax_psd.set_xlabel('Frequency, Hz')
+    ax_psd.set_xlim(psd.freqs[0], psd.freqs[-1])
+    ax_psd.set_ylabel('Power spectral density')
+
+    ax_psd.plot(psd.freqs, psd.psd_total, label='X+Y+Z',
+                color=_KLIPPER_AXIS_COLORS['total'], linewidth=1.2)
+    ax_psd.plot(psd.freqs, psd.psd_x, label='X',
+                color=_KLIPPER_AXIS_COLORS['x'], alpha=0.85)
+    ax_psd.plot(psd.freqs, psd.psd_y, label='Y',
+                color=_KLIPPER_AXIS_COLORS['y'], alpha=0.85)
+    ax_psd.plot(psd.freqs, psd.psd_z, label='Z',
+                color=_KLIPPER_AXIS_COLORS['z'], alpha=0.85)
+
+    ax_shaper = ax_psd.twinx()
+    ax_shaper.set_ylabel('Shaper vibration reduction (ratio)')
+    ax_shaper.set_ylim(0.0, 1.05)
+
+    best_curve = None
+    for cand in report.candidates:
+        shaper = _shapers.make_shaper(cand.name, cand.frequency, damping_ratio)
+        v_curve = shaper.residual_vibration_curve(psd.freqs, damping_ratio)
+        is_best = cand is report.recommended
+        if is_best:
+            best_curve = v_curve
+        label = (f'{cand.name.upper()} ({cand.frequency:.1f} Hz, '
+                 f'vibr={cand.vibration * 100:.1f}%, '
+                 f's={cand.smoothing:.2f})')
+        ax_shaper.plot(psd.freqs, v_curve, label=label,
+                       linestyle='dashdot' if is_best else 'dotted',
+                       linewidth=1.5 if is_best else 1.0)
+
+    if best_curve is not None:
+        ax_psd.plot(psd.freqs, f_series * best_curve,
+                    label='After\nshaper', color='cyan', linewidth=1.4)
+
+    ax_psd.axvline(report.peak_frequency, color='gray', linestyle='--',
+                   alpha=0.6)
+    ax_psd.grid(which='major', color='grey', alpha=0.35)
+    ax_psd.grid(which='minor', color='lightgrey', alpha=0.25)
+    ax_psd.minorticks_on()
+
+    # Combine legends from both axes into a single box, placed outside the
+    # plotting area on the right so it doesn't cover any curves.
+    h1, l1 = ax_psd.get_legend_handles_labels()
+    h2, l2 = ax_shaper.get_legend_handles_labels()
+    fig.legend(h1 + h2, l1 + l2, loc='center left',
+               fontsize=8, bbox_to_anchor=(0.78, 0.55),
+               framealpha=0.85)
+
+    fig.suptitle(
+        f'Shaper calibration (axis {axis.upper()}) -- '
+        f'recommended: {report.recommended.name.upper()} @ '
+        f'{report.recommended.frequency:.1f} Hz '
+        f'(peak {report.peak_frequency:.1f} Hz)',
+        fontsize=11,
+    )
+    # Leave 22% of the canvas on the right for the legend, and a strip on
+    # top for the suptitle.
+    fig.tight_layout(rect=(0, 0, 0.78, 0.94))
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+    return path
+
+
 def save_all(samples: AccelSamples, psd: PsdResult, report: ShaperReport,
              out_dir: Path, axis: str = 'x',
              damping_ratio: float = _shapers.DEFAULT_DAMPING_RATIO
@@ -337,4 +496,13 @@ def save_all(samples: AccelSamples, psd: PsdResult, report: ShaperReport,
                                          f'{report.recommended.frequency:.1f} Hz'),
         'shaper_png': plot_shaper_candidates(psd, report, out_dir, axis, ts,
                                              damping_ratio),
+        # Klipper-style equivalents -- saved next to the originals so they
+        # both show up in the "Recent results" card.
+        'psd_klipper_png': plot_psd_klipper(
+            psd, out_dir, axis, ts,
+            peak=(report.peak_frequency, report.peak_value),
+            title_suffix=f'recommended {report.recommended.name.upper()} @ '
+                         f'{report.recommended.frequency:.1f} Hz'),
+        'shaper_klipper_png': plot_shaper_klipper(
+            psd, report, out_dir, axis, ts, damping_ratio),
     }
