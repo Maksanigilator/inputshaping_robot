@@ -35,13 +35,16 @@ def generate_launch_description() -> LaunchDescription:
                 'gui_host': '0.0.0.0',
                 'gui_port': gui_port,
                 'data_dir': '/workspace/data',
-                'v_max_default': 0.3,
-                'a_max_default': 0.5,
-                # aida_bot platform: r=0.095 m, odroid_driver max 100 rpm
-                # gives a hard ceiling around 0.99 m/s -- keep a small
-                # margin so the trapezoid never asks for unreachable speed.
-                'v_max_limit': 0.9,
-                'a_max_limit': 1.0,
+                'v_max_default': 0.6,
+                'a_max_default': 2.0,
+                # Mecanum wheels on carpet are very slip-happy: low accel
+                # never breaks static friction so the rollers spin in place.
+                # We deliberately allow values above the platform's nominal
+                # ~1 m/s so the user can punch through the slip envelope --
+                # the motors will saturate by themselves before anything
+                # mechanical gets hurt.
+                'v_max_limit': 2.0,
+                'a_max_limit': 5.0,
             }],
         ),
     ])

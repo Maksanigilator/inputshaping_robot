@@ -156,6 +156,17 @@ code {
   margin-top: 4px;
 }
 
+.result-preview {
+  margin-top: 8px;
+}
+.result-preview img {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid #2a2d33;
+  border-radius: 4px;
+  background: #fff;
+}
+
 #imu-canvas {
   display: block;
   width: 100%;

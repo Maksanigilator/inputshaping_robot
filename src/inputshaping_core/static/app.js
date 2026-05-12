@@ -43,13 +43,19 @@ async function refresh() {
 
   // Shaper.
   const sh = s.shaper;
+  let shaperBlurb;
   if (sh.enabled) {
-    q('#shaper-active').textContent =
+    shaperBlurb =
       `${sh.name} @ ${fmt(sh.frequency, 1)} Hz (\u03b6=${fmt(sh.damping_ratio, 3)})`;
   } else {
-    q('#shaper-active').textContent = 'disabled (pass-through)';
+    shaperBlurb = 'disabled (pass-through)';
   }
+  q('#shaper-active').textContent = shaperBlurb;
   q('#shaper-delay').textContent = `${fmt(1000 * sh.delay, 1)} ms`;
+  // Mirror onto the record card so the user knows what's about to be
+  // baked into the next recording without scrolling back up.
+  const rs = q('#record-shaper-now');
+  if (rs) rs.textContent = shaperBlurb;
 
   // IMU.
   q('#imu-rate').textContent =
@@ -62,16 +68,34 @@ async function refresh() {
     list.innerHTML = '<li class="muted">No runs yet.</li>';
   } else {
     list.innerHTML = '';
-    for (const r of s.results) {
+    // Reverse so the newest run is at the top; nicer when stacking
+    // multiple motion-record runs (with/without shaper) for comparison.
+    for (const r of [...s.results].reverse()) {
       const li = document.createElement('li');
       let recommendation = '';
       if (r.recommended) {
         recommendation = ` &mdash; recommended <b>${r.recommended.name}</b>
           @ ${fmt(r.recommended.frequency, 1)} Hz (V=${fmt(r.recommended.vibration, 2)})`;
       }
+      const filesHtml = (r.files || [])
+        .map(f => `<a href="/data/${f}" target="_blank">${f}</a>`)
+        .join(' ');
+      // Inline-preview the PNG for motion records so the user gets the
+      // result immediately under the button (it's the whole point of
+      // running it). PSD results have multiple PNGs; skip the preview
+      // there to keep the list scannable.
+      let preview = '';
+      if (r.kind === 'motion_record') {
+        const png = (r.files || []).find(f => f.endsWith('.png'));
+        if (png) {
+          preview = `<div class="result-preview"><a href="/data/${png}"
+            target="_blank"><img src="/data/${png}" alt="${png}"></a></div>`;
+        }
+      }
       li.innerHTML = `
         <div><b>${r.label}</b> &mdash; ${r.timestamp}${recommendation}</div>
-        <div>${r.files.map(f => `<a href="/data/${f}" target="_blank">${f}</a>`).join(' ')}</div>
+        <div>${filesHtml}</div>
+        ${preview}
       `;
       list.appendChild(li);
     }
@@ -84,21 +108,29 @@ function showPsdFields(method) {
 
 // Surface the server's clamp decision and the actual trapezoid the runner
 // is about to publish, so users notice when their input was silently capped
-// (e.g. a v_max=50 typo getting chopped to the 0.9 m/s hardware ceiling).
-function showMotionInfo(exp) {
-  const el = q('#motion-info');
+// (e.g. a v_max=50 typo getting chopped to the v_max_limit ceiling).
+function showMotionInfo(targetSel, exp) {
+  const el = q(targetSel);
   if (!el || !exp) return;
   const req = exp.requested || {};
   const app = exp.applied || {};
   const warn = (exp.warnings || []).join(' ');
   const dur = Number.isFinite(exp.duration) ? exp.duration.toFixed(2) : '—';
+  // Optional record-only field: total recording window (profile +
+  // shaper delay + post-roll). Only show if the API returned it.
+  const recDur = Number.isFinite(exp.record_duration)
+    ? ` &middot; recording ${exp.record_duration.toFixed(2)} s` : '';
+  const shaperBlurb = exp.shaper_label
+    ? ` &middot; shaper <b>${exp.shaper_label}</b>` : '';
+  const postRoll = Number.isFinite(app.post_roll)
+    ? `, post-roll: <b>${fmt(app.post_roll, 1)}</b> s` : '';
   el.classList.toggle('warn', !!warn);
   el.hidden = false;
   el.innerHTML = `
-    <div><b>${exp.label || 'motion'}</b> &mdash; duration ${dur} s</div>
+    <div><b>${exp.label || 'motion'}</b> &mdash; profile ${dur} s${recDur}${shaperBlurb}</div>
     <div class="muted">
       v_max: ${fmt(req.v_max)} &rarr; <b>${fmt(app.v_max)}</b> m/s,
-      a_max: ${fmt(req.a_max)} &rarr; <b>${fmt(app.a_max)}</b> m/s<sup>2</sup>
+      a_max: ${fmt(req.a_max)} &rarr; <b>${fmt(app.a_max)}</b> m/s<sup>2</sup>${postRoll}
     </div>
     ${warn ? `<div class="warn-text">⚠ ${warn}</div>` : ''}
   `;
@@ -121,12 +153,30 @@ document.addEventListener('DOMContentLoaded', () => {
       v_max: parseFloat(q('#motion-vmax').value),
       a_max: parseFloat(q('#motion-amax').value),
     });
-    showMotionInfo(resp && resp.experiment);
+    showMotionInfo('#motion-info', resp && resp.experiment);
     return resp;
   };
   q('#motion-fwd').onclick = () => startMotion(+1).then(refresh);
   q('#motion-bwd').onclick = () => startMotion(-1).then(refresh);
   q('#motion-cancel').onclick = () => postJSON('/api/cancel').then(refresh);
+
+  // Motion record card: same trapezoid as Drive but synchronously
+  // captures IMU + the shaped cmd_v, then ships them to the worker
+  // that writes the CSV/PNG bundle. The shaper used is whatever is
+  // currently Enable'd in the Shaper card -- that state is mirrored
+  // onto #record-shaper-now on every poll.
+  const startRecord = async (sign) => {
+    const resp = await postJSON('/api/motion_record', {
+      distance: sign * parseFloat(q('#record-dist').value),
+      v_max: parseFloat(q('#record-vmax').value),
+      a_max: parseFloat(q('#record-amax').value),
+      post_roll: parseFloat(q('#record-postroll').value),
+    });
+    showMotionInfo('#record-info', resp && resp.experiment);
+    return resp;
+  };
+  q('#record-fwd').onclick = () => startRecord(+1).then(refresh);
+  q('#record-bwd').onclick = () => startRecord(-1).then(refresh);
 
   q('#psd-method').onchange = (e) => showPsdFields(e.target.value);
   showPsdFields(q('#psd-method').value);

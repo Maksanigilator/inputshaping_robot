@@ -373,6 +373,12 @@ def plot_psd_klipper(psd: PsdResult, out_dir: Path, axis: str = 'x',
     ax_.plot(psd.freqs, psd.psd_z, label='Z',
              color=_KLIPPER_AXIS_COLORS['z'], alpha=0.85)
 
+    # PSD is non-negative; pin the bottom so the baseline visually equals 0
+    # rather than the auto-padded -5%.
+    psd_ymax = float(max(psd.psd_total.max(), psd.psd_x.max(),
+                         psd.psd_y.max(), psd.psd_z.max()))
+    ax_.set_ylim(0.0, psd_ymax * 1.05 if psd_ymax > 0 else 1.0)
+
     if peak is not None:
         pf, pv = peak
         ax_.axvline(pf, color='gray', linestyle='--', alpha=0.7)
@@ -428,6 +434,16 @@ def plot_shaper_klipper(psd: PsdResult, report: ShaperReport,
                 color=_KLIPPER_AXIS_COLORS['y'], alpha=0.85)
     ax_psd.plot(psd.freqs, psd.psd_z, label='Z',
                 color=_KLIPPER_AXIS_COLORS['z'], alpha=0.85)
+
+    # Pin the left axis to a non-negative range with no extra padding below
+    # zero -- otherwise matplotlib's 5% breathing room pushes the left zero
+    # *below* the twin-axis zero, and the dashdot shaper-residual curves
+    # appear to dip below the PSD baseline. They never actually do
+    # (residual_vibration = sqrt(s^2 + c^2) >= 0); the axes are just
+    # misaligned.
+    psd_ymax = float(max(psd.psd_total.max(), psd.psd_x.max(),
+                         psd.psd_y.max(), psd.psd_z.max()))
+    ax_psd.set_ylim(0.0, psd_ymax * 1.05 if psd_ymax > 0 else 1.0)
 
     ax_shaper = ax_psd.twinx()
     ax_shaper.set_ylabel('Shaper vibration reduction (ratio)')

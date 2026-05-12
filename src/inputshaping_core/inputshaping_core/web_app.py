@@ -37,6 +37,8 @@ class _Controller:
                          damping_ratio: float, enabled: bool) -> dict: ...
     def start_motion(self, distance: float, v_max: float, a_max: float
                      ) -> dict: ...
+    def start_motion_record(self, distance: float, v_max: float,
+                            a_max: float, post_roll: float) -> dict: ...
     def start_psd(self, method: str, params: dict[str, Any]) -> dict: ...
     def cancel(self) -> dict: ...
 
@@ -118,6 +120,20 @@ def create_app(controller: _Controller, data_dir: Path) -> Flask:
                 distance=float(d.get('distance', 1.0)),
                 v_max=float(d.get('v_max', 0.3)),
                 a_max=float(d.get('a_max', 0.5)),
+            )
+        except (ValueError, RuntimeError) as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 400
+        return jsonify({'ok': True, 'experiment': res})
+
+    @app.post('/api/motion_record')
+    def api_motion_record() -> Any:
+        d = request.get_json(force=True) or {}
+        try:
+            res = controller.start_motion_record(
+                distance=float(d.get('distance', 1.0)),
+                v_max=float(d.get('v_max', 0.6)),
+                a_max=float(d.get('a_max', 2.0)),
+                post_roll=float(d.get('post_roll', 1.5)),
             )
         except (ValueError, RuntimeError) as exc:
             return jsonify({'ok': False, 'error': str(exc)}), 400

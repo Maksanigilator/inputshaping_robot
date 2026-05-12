@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
-"""Side-by-side observer for /cmd_vel (post-mux command to the drive) and
-/wheel_odometry (what the odroid_driver actually integrates from the
-encoders). Run this on a host that sees the robot's ROS graph (typically
-on the robot itself, inside aida_bot_ws-odroid_node-1) while you press
-"Forward" in the GUI.
+"""Side-by-side observer for the drive chain.
 
-Output is one row per 50 ms with the latest known value on each topic and
-how stale that value is. A long run looks like::
+Subscribes to:
+  * /cmd_vel          (geometry_msgs/Twist)    -- what we asked for
+  * /wheel_odometry   (geometry_msgs/Twist)    -- velocity integrated by
+                                                   odroid_driver from the
+                                                   motor encoders
+  * /odom             (nav_msgs/Odometry)      -- full pose, if the driver
+                                                   publishes it (optional)
 
-    19:31:02.105  cmd vx=+0.000  odom vx=+0.000 | age cmd=  20ms odom=  35ms
-    19:31:02.205  cmd vx=+0.122  odom vx=+0.041 | age cmd=  10ms odom=  35ms
-    19:31:02.305  cmd vx=+0.244  odom vx=+0.082 | ...
+Each 50 ms row shows the latest known value on each topic and how stale it
+is. On Ctrl-C (or after --duration) the script prints a summary with
+**three independent estimates of the travelled distance**:
 
-If `cmd` ramps up to v_max and stays there while `odom` lags or saturates
-much lower, the bottleneck is the motor controller / wheel slip, not us.
+  - integrated from /cmd_vel  (what we *commanded*)
+  - integrated from /wheel_odometry  (what the encoders *think* happened)
+  - direct delta of /odom.pose.position  (driver's own pose, if available)
+
+Compare these against a tape-measure on the floor. If the encoder-based
+estimates are close to the commanded value but the robot physically moves
+much less, the wheels are slipping. If all three estimates are large but
+the robot moved very little, the calibration (wheel_radius, gear ratio in
+odroid_driver) is wrong -- everything in the ROS graph is scaled by the
+same wrong factor.
 
 Usage::
 
@@ -24,10 +33,12 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import math
 import time
 
 import rclpy
 from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
@@ -40,17 +51,62 @@ class Probe(Node):
                          history=HistoryPolicy.KEEP_LAST)
         self._last_cmd: tuple[float, float, float] | None = None
         self._last_odom: tuple[float, float, float] | None = None
+        self._last_pose: tuple[float, float, float] | None = None
+        self._pose_origin: tuple[float, float] | None = None
+        # Trapezoidal integration of linear.x from cmd_vel & wheel_odometry.
+        self._cmd_dist = 0.0
+        self._odom_dist = 0.0
+        self._cmd_prev: tuple[float, float] | None = None
+        self._odom_prev: tuple[float, float] | None = None
+        # Max speeds we've seen (handy for sanity checking).
+        self._cmd_vmax = 0.0
+        self._odom_vmax = 0.0
+        # /odom pose delta -- this is the driver's own integrator, the most
+        # honest single-number estimate we can get without an external
+        # ground-truth reference.
+        self._pose_dx_abs = 0.0
         self.create_subscription(Twist, '/cmd_vel', self._on_cmd, qos)
         self.create_subscription(Twist, '/wheel_odometry', self._on_odom, qos)
+        # /odom is optional -- some drivers only publish wheel_odometry.
+        # Use BEST_EFFORT since many odom publishers use it.
+        odom_qos = QoSProfile(depth=10,
+                              reliability=ReliabilityPolicy.BEST_EFFORT,
+                              history=HistoryPolicy.KEEP_LAST)
+        self.create_subscription(Odometry, '/odom', self._on_pose, odom_qos)
         self.create_timer(0.05, self._tick)
         self._t0 = time.monotonic()
         self._row = 0
 
     def _on_cmd(self, m: Twist) -> None:
-        self._last_cmd = (time.monotonic(), m.linear.x, m.angular.z)
+        now = time.monotonic()
+        v = float(m.linear.x)
+        if self._cmd_prev is not None:
+            dt = max(0.0, now - self._cmd_prev[0])
+            # Trapezoidal rule with the previous sample.
+            self._cmd_dist += 0.5 * (v + self._cmd_prev[1]) * dt
+        self._cmd_prev = (now, v)
+        self._last_cmd = (now, v, float(m.angular.z))
+        self._cmd_vmax = max(self._cmd_vmax, abs(v))
 
     def _on_odom(self, m: Twist) -> None:
-        self._last_odom = (time.monotonic(), m.linear.x, m.angular.z)
+        now = time.monotonic()
+        v = float(m.linear.x)
+        if self._odom_prev is not None:
+            dt = max(0.0, now - self._odom_prev[0])
+            self._odom_dist += 0.5 * (v + self._odom_prev[1]) * dt
+        self._odom_prev = (now, v)
+        self._last_odom = (now, v, float(m.angular.z))
+        self._odom_vmax = max(self._odom_vmax, abs(v))
+
+    def _on_pose(self, m: Odometry) -> None:
+        x = float(m.pose.pose.position.x)
+        y = float(m.pose.pose.position.y)
+        if self._pose_origin is None:
+            self._pose_origin = (x, y)
+        dx = x - self._pose_origin[0]
+        dy = y - self._pose_origin[1]
+        self._pose_dx_abs = math.hypot(dx, dy)
+        self._last_pose = (time.monotonic(), dx, dy)
 
     def _tick(self) -> None:
         now = time.monotonic()
@@ -65,12 +121,45 @@ class Probe(Node):
         if self._last_odom is not None:
             odom_v = f'{self._last_odom[1]:+.3f}'
             odom_age = f'{(now - self._last_odom[0]) * 1000:5.0f}ms'
-        # Print a header every 25 rows so a long capture stays readable.
+        pose_dx = '   ?  '
+        if self._last_pose is not None:
+            pose_dx = f'{self._last_pose[1]:+.3f}'
         if self._row % 25 == 0:
-            print('   t,s | cmd vx       odom vx     | age_cmd  age_odom')
-        print(f'{rel:6.2f} | cmd vx={cmd_v}  odom vx={odom_v} | {cmd_age}  {odom_age}',
+            print('   t,s | cmd vx       odom vx     | age_cmd  age_odom | '
+                  '   /odom dx')
+        print(f'{rel:6.2f} | cmd vx={cmd_v}  odom vx={odom_v} '
+              f'| {cmd_age}  {odom_age} | {pose_dx} m',
               flush=True)
         self._row += 1
+
+    def print_summary(self) -> None:
+        bar = '=' * 60
+        print()
+        print(bar)
+        print('Drive-chain summary')
+        print(bar)
+        print(f'  peak |cmd_vel.linear.x|       : {self._cmd_vmax:.3f} m/s')
+        print(f'  peak |wheel_odom.linear.x|    : {self._odom_vmax:.3f} m/s')
+        print()
+        print('  integrated distance (signed):')
+        print(f'    from /cmd_vel              : {self._cmd_dist:+.3f} m')
+        print(f'    from /wheel_odometry       : {self._odom_dist:+.3f} m')
+        if self._last_pose is not None:
+            dx, dy = self._last_pose[1], self._last_pose[2]
+            print(f'    /odom net delta (x,y)      : '
+                  f'({dx:+.3f}, {dy:+.3f}) m  '
+                  f'|d|={self._pose_dx_abs:.3f} m')
+        else:
+            print('    /odom net delta             : (no Odometry msgs)')
+        print(bar)
+        print('Compare the numbers above with a tape measurement on the')
+        print('floor. If all three rows show ~1.0 m but the robot only')
+        print('travelled ~0.2 m, the chain is slipping. If they show ~0.2 m')
+        print('matching the floor, odometry is honest and the command/profile')
+        print('is the limit (raise distance, v_max or a_max). If /odom is')
+        print('much smaller than /wheel_odometry, the driver itself already')
+        print('knows about the slip via fused IMU/EKF.')
+        print(bar, flush=True)
 
 
 def main() -> None:
@@ -91,6 +180,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        node.print_summary()
         node.destroy_node()
         rclpy.shutdown()
 

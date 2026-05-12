@@ -27,6 +27,7 @@ from rclpy.qos import QoSPresetProfiles
 from sensor_msgs.msg import Imu
 
 from . import motion as _motion
+from . import motion_record as _motion_record
 from . import psd as _psd
 from .experiment_runner import ExperimentResult, ExperimentRunner
 from .imu_buffer import ImuBuffer, ImuSample
@@ -57,13 +58,15 @@ class ExperimentNode(Node):
         self.declare_parameter('gui_host', '0.0.0.0')
         self.declare_parameter('gui_port', gui_port_default)
         self.declare_parameter('data_dir', data_default)
-        self.declare_parameter('v_max_default', 0.25)
-        self.declare_parameter('a_max_default', 0.5)
-        # Physical ceiling of the aida_bot platform: wheel_radius=0.095 m,
-        # odroid_driver max_speed=100 rpm  ->  v_max ~= 0.99 m/s. We cap at
-        # 0.9 to leave a small margin, and at 1.0 m/s^2 for accel.
-        self.declare_parameter('v_max_limit', 0.9)
-        self.declare_parameter('a_max_limit', 1.0)
+        self.declare_parameter('v_max_default', 0.6)
+        self.declare_parameter('a_max_default', 2.0)
+        # Mecanum-on-carpet workaround: roller friction is poor and a soft
+        # ramp simply spins the wheels in place, so we let the user request
+        # well above the platform's nominal ceiling -- the motors will
+        # saturate on their own. Override via ROS params if you want
+        # tighter safety on a different surface.
+        self.declare_parameter('v_max_limit', 2.0)
+        self.declare_parameter('a_max_limit', 5.0)
 
         raw_topic = self.get_parameter('cmd_vel_raw_topic').value
         shaped_topic = self.get_parameter('cmd_vel_shaped_topic').value
@@ -112,6 +115,22 @@ class ExperimentNode(Node):
         self._psd_worker = threading.Thread(
             target=self._psd_worker_loop, name='psd-worker', daemon=True)
         self._psd_worker.start()
+
+        # Background worker for motion-record post-processing (CSV + plot).
+        # Separate queue from PSD so a slow plot render never blocks the
+        # next experiment.
+        self._motion_queue: queue.Queue = queue.Queue()
+        self._motion_worker = threading.Thread(
+            target=self._motion_worker_loop, name='motion-record-worker',
+            daemon=True)
+        self._motion_worker.start()
+
+        # Motion-record state. ``None`` means no recording is active; when
+        # set, ``_publish_tick`` appends (t_rel, raw_v, shaped_v) to
+        # ``_record_log`` until ``t_end`` is reached, then ships everything
+        # to the worker thread for analysis.
+        self._record_state: dict | None = None
+        self._record_log: list[tuple[float, float, float]] = []
 
         # Flask GUI.
         app = create_app(_FlaskBridge(self), self._data_dir)
@@ -183,6 +202,21 @@ class ExperimentNode(Node):
         out = Twist()
         out.linear.x = float(shaped_v)
         self._pub.publish(out)
+
+        # Capture command samples for an in-flight motion recording. We
+        # log the *shaped* velocity because that is what the chassis
+        # actually receives, and the user's cmd-vs-measured plot must
+        # match the actual command (otherwise the shaper's effect would
+        # vanish from the "commanded" trace).
+        if self._record_state is not None:
+            elapsed = now - self._record_state['t_start']
+            self._record_log.append((elapsed, raw_v, shaped_v))
+            if elapsed >= self._record_state['t_end']:
+                state = self._record_state
+                log = self._record_log
+                self._record_state = None
+                self._record_log = []
+                self._motion_queue.put((state, log))
 
     # ------------------------------------------------------------------
     # Controller interface (called from Flask threads)
@@ -281,6 +315,108 @@ class ExperimentNode(Node):
                        'a_max': self._a_max_limit},
             'warnings': warnings,
         }
+
+    def start_motion_record(self, distance: float, v_max: float,
+                            a_max: float, post_roll: float = 1.5) -> dict:
+        """Trapezoidal motion + synchronized IMU capture + plot/CSV.
+
+        Equivalent to :meth:`start_motion` but also records cmd_v and
+        IMU samples for the full duration of:
+            ramp + cruise + ramp + shaper.delay + post_roll
+        and ships the bundle to a background worker that writes a
+        ``motion_record_<tag>_<ts>.{csv,png}`` pair into the data dir.
+        The currently configured shaper (whatever is enabled in the
+        GUI) is applied verbatim; the "tag" in the filename encodes
+        whether shaping was on so the user can keep both runs without
+        clobbering.
+        """
+        if self._record_state is not None:
+            raise RuntimeError('a motion recording is already in progress')
+        if not self._runner.is_idle:
+            raise RuntimeError('runner is busy; cancel the current run first')
+
+        v_req, a_req = float(v_max), float(a_max)
+        v_max = float(np.clip(v_req, 0.02, self._v_max_limit))
+        a_max = float(np.clip(a_req, 0.02, self._a_max_limit))
+        post_roll = float(np.clip(post_roll, 0.0, 10.0))
+        warnings: list[str] = []
+        if abs(v_max - v_req) > 1e-6:
+            warnings.append(
+                f'v_max clamped {v_req:.3f} -> {v_max:.3f} m/s '
+                f'(limit {self._v_max_limit:.2f}).')
+        if abs(a_max - a_req) > 1e-6:
+            warnings.append(
+                f'a_max clamped {a_req:.3f} -> {a_max:.3f} m/s^2 '
+                f'(limit {self._a_max_limit:.2f}).')
+        for w in warnings:
+            self.get_logger().warn(w)
+
+        profile = _motion.trapezoid_distance(distance=distance,
+                                             v_max=v_max, a_max=a_max,
+                                             dt=PUBLISH_PERIOD_S)
+
+        shaper_snap = self._shaper.snapshot()
+        shaper_delay = float(shaper_snap.get('delay') or 0.0)
+        shaper_label = self._format_shaper_label(shaper_snap)
+        shaper_tag = self._format_shaper_tag(shaper_snap)
+        # Total recording window: the profile itself (already includes
+        # symmetric ramps), the shaper's group delay (so the tail
+        # impulses of e.g. 2HUMP_EI land inside the capture), and the
+        # user-requested post-roll so the strip's ringdown is visible
+        # in the plot.
+        record_total = float(profile.duration + shaper_delay + post_roll)
+
+        capture_t0 = time.monotonic() - self._wall_t0
+        self._imu.start(capture_t0)
+
+        self._record_log = []
+        self._record_state = {
+            't_start': time.monotonic(),
+            't_end': record_total,
+            'capture_t0': capture_t0,
+            'profile_duration': float(profile.duration),
+            'shaper_delay': shaper_delay,
+            'post_roll': post_roll,
+            'distance': float(distance),
+            'v_max': v_max,
+            'a_max': a_max,
+            'shaper_label': shaper_label,
+            'shaper_tag': shaper_tag,
+        }
+
+        self._runner.start(profile)
+
+        return {
+            'label': profile.label,
+            'duration': profile.duration,
+            'record_duration': record_total,
+            'shaper_label': shaper_label,
+            'shaper_tag': shaper_tag,
+            'metadata': profile.metadata,
+            'requested': {'v_max': v_req, 'a_max': a_req,
+                          'post_roll': post_roll},
+            'applied': {'v_max': v_max, 'a_max': a_max,
+                        'post_roll': post_roll},
+            'limits': {'v_max': self._v_max_limit,
+                       'a_max': self._a_max_limit},
+            'warnings': warnings,
+        }
+
+    @staticmethod
+    def _format_shaper_label(snap: dict) -> str | None:
+        if not snap.get('enabled') or not snap.get('name'):
+            return None
+        return f"{str(snap['name']).upper()} @ {float(snap['frequency']):.1f} Hz"
+
+    @staticmethod
+    def _format_shaper_tag(snap: dict) -> str:
+        # File tag used as a stem in motion_record_<tag>_<ts>.{csv,png}.
+        # Keep it short and shell-safe -- no dots, no spaces.
+        if not snap.get('enabled') or not snap.get('name'):
+            return 'noshaper'
+        name = str(snap['name']).lower()
+        freq = f"{float(snap['frequency']):.1f}".replace('.', 'p')
+        return f'{name}_{freq}hz'
 
     def start_psd(self, method: str, params: dict) -> dict:
         direction = float(params.get('direction', 1))
@@ -411,6 +547,86 @@ class ExperimentNode(Node):
             f'{report.recommended.frequency:.1f} Hz'
         )
 
+    # ------------------------------------------------------------------
+    # Background motion-record worker
+    # ------------------------------------------------------------------
+
+    def _motion_worker_loop(self) -> None:
+        while True:
+            state, log = self._motion_queue.get()
+            try:
+                self._process_motion_record(state, log)
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().error(
+                    f'motion record processing failed: {exc!r}')
+
+    def _process_motion_record(self, state: dict,
+                               log: list[tuple[float, float, float]]) -> None:
+        # Give the last IMU samples a tick to land in the ring buffer
+        # before we snapshot. 100 ms is comfortably above the 1 kHz
+        # period and matches what the PSD worker uses.
+        time.sleep(0.1)
+        capture_t0 = float(state['capture_t0'])
+        capture_t1 = capture_t0 + float(state['t_end'])
+        ts, ax, ay, az = self._imu.snapshot(since_t=capture_t0,
+                                            until_t=capture_t1)
+        if len(ts) < 64:
+            self.get_logger().warn(
+                f'motion record: only {len(ts)} IMU samples in window '
+                f'[{capture_t0:.2f}, {capture_t1:.2f}] -- skipping')
+            return
+        if not log:
+            self.get_logger().warn(
+                'motion record: empty command log -- skipping')
+            return
+
+        cmd_arr = np.asarray(log, dtype=float)
+        cmd_t = cmd_arr[:, 0]
+        # Column 2 is the *shaped* velocity (what was actually published);
+        # column 1 holds the pre-shaper command for diagnostics if we ever
+        # need to add it back to the plot.
+        cmd_v = cmd_arr[:, 2]
+        # Re-base IMU timestamps to the same t=0 as cmd_t so the plot
+        # axes line up exactly.
+        imu_t_rel = ts - capture_t0
+
+        rec = _motion_record.MotionRecording(
+            cmd_t=cmd_t, cmd_v=cmd_v,
+            imu_t=imu_t_rel, imu_ax=ax, imu_ay=ay, imu_az=az,
+            distance=float(state['distance']),
+            v_max=float(state['v_max']),
+            a_max=float(state['a_max']),
+            post_roll=float(state['post_roll']),
+            shaper_label=state.get('shaper_label'),
+        )
+        shaper_tag = str(state.get('shaper_tag') or 'noshaper')
+        files = _motion_record.save_all(rec, self._data_dir,
+                                        shaper_tag=shaper_tag)
+        rel = {k: str(Path(v).name) for k, v in files.items()}
+        entry = {
+            'label': (f'Motion record '
+                      f'({state["shaper_label"] or "no shaper"})'),
+            'kind': 'motion_record',
+            'method': 'trapezoid',
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'distance': float(state['distance']),
+            'v_max': float(state['v_max']),
+            'a_max': float(state['a_max']),
+            'post_roll': float(state['post_roll']),
+            'shaper_label': state.get('shaper_label'),
+            'shaper_tag': shaper_tag,
+            'profile_duration': float(state['profile_duration']),
+            'shaper_delay': float(state['shaper_delay']),
+            'num_imu_samples': int(len(ts)),
+            'num_cmd_samples': int(len(cmd_t)),
+            'files': list(rel.values()),
+        }
+        with self._state_lock:
+            self._results.append(entry)
+        self.get_logger().info(
+            f'motion record done: {len(ts)} IMU + {len(cmd_t)} cmd samples, '
+            f'shaper={state["shaper_label"] or "off"}')
+
 
 class _FlaskBridge:
     """Adapter that maps the GUI's Controller protocol to ExperimentNode."""
@@ -437,6 +653,11 @@ class _FlaskBridge:
     def start_motion(self, distance, v_max, a_max):
         return self._node.start_motion(distance=distance,
                                        v_max=v_max, a_max=a_max)
+
+    def start_motion_record(self, distance, v_max, a_max, post_roll):
+        return self._node.start_motion_record(
+            distance=distance, v_max=v_max, a_max=a_max,
+            post_roll=post_roll)
 
     def start_psd(self, method, params):
         return self._node.start_psd(method=method, params=params)
